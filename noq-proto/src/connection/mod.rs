@@ -1127,7 +1127,11 @@ impl Connection {
             .map(|(path_id, path)| (path.data.priority, *path_id))
             .collect::<TinyVec<[(u8, PathId); 8]>>();
         path_order.sort_unstable();
-        for (_, path_id) in path_order {
+        // Set once a path that may send data is only held back by pacing and can drain the
+        // queued data within the spill threshold. Paths with a higher priority value then do
+        // not send SpaceKind::Data frames, see TransportConfig::path_spill_threshold.
+        let mut held_priority = None;
+        for (priority, path_id) in path_order {
             if !self.paths.contains_key(&path_id) {
                 // Discarded while polling an earlier path.
                 continue;
@@ -1142,8 +1146,11 @@ impl Connection {
                 return Some(transmit);
             }
 
-            let info = self.scheduling_info(path_id);
-            if let Some(transmit) = self.poll_transmit_on_path(
+            let mut info = self.scheduling_info(path_id);
+            if held_priority.is_some_and(|held| priority > held) {
+                info.may_send_data = false;
+            }
+            match self.poll_transmit_on_path(
                 now,
                 buf,
                 path_id,
@@ -1151,11 +1158,23 @@ impl Connection {
                 &info,
                 connection_close_pending,
             ) {
-                #[cfg(test)]
-                {
-                    self.partial_stats.transmits_tx += 1;
+                Ok(transmit) => {
+                    #[cfg(test)]
+                    {
+                        self.partial_stats.transmits_tx += 1;
+                    }
+                    return Some(transmit);
                 }
-                return Some(transmit);
+                Err(path_blocked) => {
+                    if held_priority.is_none()
+                        && info.may_send_data
+                        && path_blocked == PathBlocked::Pacing
+                        && self.path_drains_backlog_before_spill(path_id)
+                    {
+                        trace!(%path_id, "holding back data on lower priority paths");
+                        held_priority = Some(priority);
+                    }
+                }
             }
 
             // Continue checking other paths, tail-loss probes may need to be sent
@@ -1287,6 +1306,21 @@ impl Connection {
         }
     }
 
+    /// Whether the path can send all queued data within [`TransportConfig::path_spill_threshold`]
+    ///
+    /// The backlog is all unsent stream data and datagrams, the rate is the path's estimated
+    /// send rate. Always `false` without a configured threshold.
+    fn path_drains_backlog_before_spill(&self, path_id: PathId) -> bool {
+        let Some(threshold) = self.config.path_spill_threshold else {
+            return false;
+        };
+        let Some(rate) = self.path_data(path_id).send_rate() else {
+            return false;
+        };
+        let backlog = self.datagrams.outgoing_total as u64 + self.streams.unsent_bytes();
+        backlog as f64 / rate as f64 <= threshold.as_secs_f64()
+    }
+
     fn build_transmit(&mut self, path_id: PathId, transmit: TransmitBuf<'_>) -> Transmit {
         debug_assert!(
             !transmit.is_empty(),
@@ -1351,7 +1385,9 @@ impl Connection {
     /// has 3 packet spaces, which this handles.
     ///
     /// See [`Self::poll_transmit_off_path`] for off-path data.
-    #[must_use]
+    ///
+    /// If nothing was sent, returns the strongest reason the path was blocked from sending, or
+    /// [`PathBlocked::No`] if it had nothing to send.
     fn poll_transmit_on_path(
         &mut self,
         now: Instant,
@@ -1360,13 +1396,13 @@ impl Connection {
         max_datagrams: NonZeroUsize,
         scheduling_info: &PathSchedulingInfo,
         connection_close_pending: bool,
-    ) -> Option<Transmit> {
+    ) -> Result<Transmit, PathBlocked> {
         // Check if there is at least one active CID to use for sending
         let Some(remote_cid) = self.remote_cids.get(&path_id).map(CidQueue::active) else {
             if !self.abandoned_paths.contains(&path_id) {
                 debug!(%path_id, "no remote CIDs for path");
             }
-            return None;
+            return Err(PathBlocked::No);
         };
 
         // Whether the last packet in the datagram must be padded so the datagram takes up
@@ -1381,12 +1417,8 @@ impl Connection {
         // Handshake and Data(PathId::ZERO) spaces.
         let mut last_packet_number = None;
 
-        // Set when either the congestion window or the pacer held a send back; drives
-        // `app_limited`, since neither case means the application ran dry.
-        let mut send_blocked = false;
-        // Set only when the congestion window itself was full. This is the spec's
-        // `C.is_cwnd_limited`, which a pacing delay must not stand in for.
-        let mut cwnd_blocked = false;
+        // The strongest reason any space was held back from sending.
+        let mut path_blocked = PathBlocked::No;
 
         let path = self.path_data(path_id);
 
@@ -1425,20 +1457,12 @@ impl Connection {
                 connection_close_pending,
                 pad_datagram,
             ) {
-                PollPathSpaceStatus::NothingToSend { path_blocked } => {
+                PollPathSpaceStatus::NothingToSend {
+                    path_blocked: space_blocked,
+                } => {
                     // Continue checking other spaces, tail-loss probes may need to be sent
                     // in all spaces.
-                    match path_blocked {
-                        PathBlocked::No => {}
-                        PathBlocked::AntiAmplification => {
-                            send_blocked = true;
-                        }
-                        PathBlocked::Congestion => {
-                            cwnd_blocked = true;
-                            send_blocked = true;
-                        }
-                        PathBlocked::Pacing => send_blocked = true,
-                    }
+                    path_blocked = path_blocked.max(space_blocked);
                 }
                 PollPathSpaceStatus::WrotePacket {
                     last_packet_number: pn,
@@ -1462,6 +1486,13 @@ impl Connection {
                 }
             }
         }
+
+        // Set when either the congestion window or the pacer held a send back; drives
+        // `app_limited`, since neither case means the application ran dry.
+        let send_blocked = path_blocked != PathBlocked::No;
+        // Set only when the congestion window itself was full. This is the spec's
+        // `C.is_cwnd_limited`, which a pacing delay must not stand in for.
+        let cwnd_blocked = path_blocked == PathBlocked::Congestion;
 
         if last_packet_number.is_some() || send_blocked {
             self.qlog.emit_recovery_metrics(
@@ -1492,9 +1523,9 @@ impl Connection {
                     transmit.len() as u64,
                     last_packet_number,
                 );
-                Some(self.build_transmit(path_id, transmit))
+                Ok(self.build_transmit(path_id, transmit))
             }
-            None => None,
+            None => Err(path_blocked),
         }
     }
 
@@ -7406,12 +7437,13 @@ struct PathSchedulingInfo {
     may_self_abandon: bool,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+/// Why a path did not send, ordered from weakest to strongest reason.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum PathBlocked {
     No,
+    Pacing,
     AntiAmplification,
     Congestion,
-    Pacing,
 }
 
 /// Fields of `Connection` specific to it being client-side or server-side

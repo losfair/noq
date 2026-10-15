@@ -69,6 +69,7 @@ pub struct TransportConfig {
 
     pub(crate) default_path_max_idle_timeout: Option<Duration>,
     pub(crate) default_path_keep_alive_interval: Option<Duration>,
+    pub(crate) path_spill_threshold: Option<Duration>,
 
     pub(crate) max_remote_nat_traversal_addresses: Option<NonZeroU8>,
     pub(crate) server_handshake_migration: bool,
@@ -454,6 +455,29 @@ impl TransportConfig {
         self
     }
 
+    /// Sets how much queued data may wait for a preferred path before it spills to less
+    /// preferred paths
+    ///
+    /// Paths are preferred by their priority, see [`Connection::set_path_priority`]. By default
+    /// (`None`) data spills to the next path as soon as the preferred path is blocked by
+    /// congestion control or pacing. Since a paced path is briefly blocked after nearly every
+    /// packet, this spreads even light traffic over all paths.
+    ///
+    /// With a threshold set, a preferred path that is only blocked by pacing keeps the data if
+    /// it can send all queued stream data and datagrams within the threshold at its current
+    /// pacing rate. Less preferred paths then only send data once the backlog grows beyond
+    /// that, or the preferred path is blocked by its congestion window. Frames that must be
+    /// sent on a specific path, like keep alives and path validation, are not held back.
+    ///
+    /// A larger threshold keeps more traffic on the preferred path at the cost of queueing
+    /// delay.
+    ///
+    /// [`Connection::set_path_priority`]: crate::Connection::set_path_priority
+    pub fn path_spill_threshold(&mut self, threshold: Option<Duration>) -> &mut Self {
+        self.path_spill_threshold = threshold;
+        self
+    }
+
     /// Get the initial max [`crate::PathId`] this endpoint allows.
     ///
     /// Returns `None` if multipath is disabled.
@@ -616,6 +640,7 @@ impl Default for TransportConfig {
             max_concurrent_multipath_paths: None,
             default_path_max_idle_timeout: None,
             default_path_keep_alive_interval: None,
+            path_spill_threshold: None,
 
             // nat traversal disabled by default
             max_remote_nat_traversal_addresses: None,
@@ -662,6 +687,7 @@ impl fmt::Debug for TransportConfig {
             max_concurrent_multipath_paths,
             default_path_max_idle_timeout,
             default_path_keep_alive_interval,
+            path_spill_threshold,
             max_remote_nat_traversal_addresses,
             server_handshake_migration,
             #[cfg(feature = "qlog")]
@@ -712,6 +738,7 @@ impl fmt::Debug for TransportConfig {
                 "default_path_keep_alive_interval",
                 default_path_keep_alive_interval,
             )
+            .field("path_spill_threshold", path_spill_threshold)
             .field(
                 "max_remote_nat_traversal_addresses",
                 max_remote_nat_traversal_addresses,

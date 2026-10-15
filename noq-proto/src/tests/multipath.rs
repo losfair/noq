@@ -5,13 +5,14 @@ use core::{net::SocketAddr, num::NonZeroU32, time::Duration};
 use std::dbg;
 
 use assert_matches::assert_matches;
+use bytes::Bytes;
 use testresult::TestResult;
 use tracing::info;
 
 use crate::connection::timer::{PathTimer, Timer};
 use crate::{
     ClientConfig, ConnectionId, ConnectionIdGenerator, Endpoint, EndpointConfig, FourTuple,
-    LOCAL_CID_COUNT, NetworkChangeHint, PathId, PathStatus, RandomConnectionIdGenerator,
+    LOCAL_CID_COUNT, NetworkChangeHint, PathId, PathStats, PathStatus, RandomConnectionIdGenerator,
     ServerConfig, Side::*, TransportConfig, cid_queue::CidQueue,
 };
 use crate::{
@@ -1341,6 +1342,89 @@ fn path_scheduling_priority() -> TestResult {
     assert!(path1 > 0);
 
     Ok(())
+}
+
+/// Sends 64 KiB of stream data or datagrams from the client over two paths, path 0 preferred,
+/// with a pacer limited to 125 kB/s and never a full congestion window. Returns the number of
+/// STREAM or DATAGRAM frames the client sent on (path 0, path 1).
+fn send_with_spill_threshold(
+    threshold: Option<Duration>,
+    datagrams: bool,
+) -> TestResult<(u64, u64)> {
+    let mut builder = ConnPair::builder().enable_multipath();
+    builder
+        .client_transport_cfg
+        .congestion_controller_factory(Arc::new(super::PacingOnlyConfig {
+            cwnd_limited_reports: Default::default(),
+        }))
+        .path_spill_threshold(threshold);
+    let mut pair = builder.connect();
+    let server_addr = pair.routes.public_server_addr();
+    let path_1 = pair.open_path(
+        Client,
+        FourTuple::from_remote(server_addr),
+        PathStatus::Available,
+    )?;
+    pair.drive();
+    pair.conn_mut(Client).set_path_priority(path_1, 1)?;
+
+    let stats_path0_t0 = pair.conn_mut(Client).path_stats(PathId::ZERO).unwrap();
+    let stats_path1_t0 = pair.conn_mut(Client).path_stats(path_1).unwrap();
+
+    if datagrams {
+        for _ in 0..64 {
+            pair.conn_mut(Client)
+                .datagrams()
+                .send(Bytes::from_static(&[42; 1024]), false)?;
+        }
+    } else {
+        let s = pair.streams(Client).open(Dir::Uni).unwrap();
+        pair.send_stream(Client, s).write(&[42; 64 * 1024])?;
+    }
+    pair.drive();
+
+    let stats_path0_t1 = pair.conn_mut(Client).path_stats(PathId::ZERO).unwrap();
+    let stats_path1_t1 = pair.conn_mut(Client).path_stats(path_1).unwrap();
+    let frames = |t0: PathStats, t1: PathStats| match datagrams {
+        true => t1.frame_tx.datagram - t0.frame_tx.datagram,
+        false => t1.frame_tx.stream - t0.frame_tx.stream,
+    };
+    Ok((
+        frames(stats_path0_t0, stats_path0_t1),
+        frames(stats_path1_t0, stats_path1_t1),
+    ))
+}
+
+fn check_path_spill_threshold(datagrams: bool) -> TestResult {
+    info!("without a threshold data spills whenever the preferred path is paced");
+    let (no_threshold_path0, no_threshold_path1) = send_with_spill_threshold(None, datagrams)?;
+    assert!(no_threshold_path0 > 0);
+    assert!(no_threshold_path1 > 0);
+
+    info!("a threshold above the drain time keeps all data on the preferred path");
+    let (path0, path1) = send_with_spill_threshold(Some(Duration::from_secs(2)), datagrams)?;
+    assert!(path0 > 0);
+    assert_eq!(path1, 0);
+
+    info!("a threshold below the drain time spills only part of the data");
+    let (path0, path1) = send_with_spill_threshold(Some(Duration::from_millis(100)), datagrams)?;
+    assert!(path0 > 0);
+    assert!(path1 > 0);
+    assert!(path1 < no_threshold_path1);
+
+    Ok(())
+}
+
+#[test]
+fn path_spill_threshold_streams() -> TestResult {
+    let _guard = subscribe();
+    check_path_spill_threshold(false)
+}
+
+#[test]
+fn path_spill_threshold_datagrams() -> TestResult {
+    let _guard = subscribe();
+    check_path_spill_threshold(true)
 }
 
 #[test]

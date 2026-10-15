@@ -421,6 +421,30 @@ impl PathData {
         self.mtud.current_mtu()
     }
 
+    /// Estimated rate at which this path can send, in bytes per second
+    ///
+    /// This is the controller's pacing rate if it reports one, or else one congestion window
+    /// per smoothed RTT, capped by the configured maximum send rate. Returns `None` if no
+    /// estimate is available.
+    pub(super) fn send_rate(&self) -> Option<u64> {
+        let metrics = self.congestion.metrics();
+        let rate = match metrics.pacing_rate {
+            Some(rate) => rate,
+            None => {
+                let rtt = self.rtt.get().as_secs_f64();
+                if rtt == 0.0 {
+                    return None;
+                }
+                (metrics.congestion_window as f64 / rtt) as u64
+            }
+        };
+        let rate = match self.pacing.max_bytes_per_second() {
+            Some(max) => rate.min(max),
+            None => rate,
+        };
+        (rate > 0).then_some(rate)
+    }
+
     /// Account for transmission of `packet` with number `pn` in `space`
     pub(super) fn sent(&mut self, pn: u64, packet: SentPacket, space: &mut PacketNumberSpace) {
         self.in_flight.insert(&packet);

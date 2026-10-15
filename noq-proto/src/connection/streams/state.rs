@@ -399,6 +399,16 @@ impl StreamsState {
         })
     }
 
+    /// Amount of stream data waiting to be sent, ignoring flow control
+    pub(crate) fn unsent_bytes(&self) -> u64 {
+        self.pending
+            .iter()
+            .filter_map(|stream| self.send.get(&stream.id)?.as_ref())
+            .filter(|s| !s.is_reset())
+            .map(|s| s.pending.unsent_bytes())
+            .sum()
+    }
+
     /// Whether MAX_STREAM_DATA frames could be sent for stream `id`
     pub(crate) fn can_send_flow_control(&self, id: StreamId) -> bool {
         self.recv
