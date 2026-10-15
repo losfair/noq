@@ -54,6 +54,7 @@ pub struct TransportConfig {
     pub(crate) allow_spin: bool,
     pub(crate) datagram_receive_buffer_size: Option<usize>,
     pub(crate) datagram_send_buffer_size: usize,
+    pub(crate) datagram_send_codel: Option<DatagramCodel>,
     #[cfg(test)]
     pub(crate) deterministic_packet_numbers: bool,
     #[cfg(test)]
@@ -324,6 +325,26 @@ impl TransportConfig {
     /// sent, older datagrams are dropped until sufficient space is available.
     pub fn datagram_send_buffer_size(&mut self, value: usize) -> &mut Self {
         self.datagram_send_buffer_size = value;
+        self
+    }
+
+    /// Active queue management for outgoing application datagrams
+    ///
+    /// Datagrams wait in the send buffer while congestion control or pacing holds them back. If
+    /// the application keeps sending faster than the paths carry, for example a tunnelled TCP
+    /// flow that grows until it sees loss, the buffer fills up and every datagram waits for the
+    /// whole buffer to drain: with the default 1 MiB that is 0.8 s at 10 Mbit/s.
+    ///
+    /// With `Some`, the queue is managed with CoDel (RFC 8289): once datagrams have waited longer
+    /// than [`DatagramCodel::target`] for a whole [`DatagramCodel::interval`], the oldest ones are
+    /// dropped at an increasing rate until the waiting time is back below the target. This keeps
+    /// queueing delay low and gives a congestion-controlled sender inside the datagrams a timely
+    /// loss signal, while short bursts still pass. [`DatagramCodel::max_delay`] optionally bounds
+    /// the delay for senders that do not slow down. The send buffer size remains a hard limit.
+    ///
+    /// Defaults to `None`: datagrams are only dropped when the send buffer is full.
+    pub fn datagram_send_codel(&mut self, codel: Option<DatagramCodel>) -> &mut Self {
+        self.datagram_send_codel = codel;
         self
     }
 
@@ -625,6 +646,7 @@ impl Default for TransportConfig {
             allow_spin: true,
             datagram_receive_buffer_size: Some(STREAM_RWND as usize),
             datagram_send_buffer_size: 1024 * 1024,
+            datagram_send_codel: None,
             #[cfg(test)]
             deterministic_packet_numbers: false,
             #[cfg(test)]
@@ -677,6 +699,7 @@ impl fmt::Debug for TransportConfig {
             allow_spin,
             datagram_receive_buffer_size,
             datagram_send_buffer_size,
+            datagram_send_codel,
             #[cfg(test)]
                 deterministic_packet_numbers: _,
             #[cfg(test)]
@@ -723,6 +746,7 @@ impl fmt::Debug for TransportConfig {
             .field("allow_spin", allow_spin)
             .field("datagram_receive_buffer_size", datagram_receive_buffer_size)
             .field("datagram_send_buffer_size", datagram_send_buffer_size)
+            .field("datagram_send_codel", datagram_send_codel)
             // congestion_controller_factory not debug
             .field("enable_segmentation_offload", enable_segmentation_offload)
             .field("address_discovery_role", address_discovery_role)
@@ -882,6 +906,40 @@ impl Default for AckFrequencyConfig {
 ///
 /// # Interaction between peers
 ///
+/// CoDel parameters for the outgoing datagram queue
+///
+/// See [`TransportConfig::datagram_send_codel`] and RFC 8289.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatagramCodel {
+    /// Acceptable standing queueing delay
+    ///
+    /// Datagrams are dropped once the time they wait stays above this for a whole interval. RFC
+    /// 8289 recommends 5-10% of the interval. Defaults to 5 ms.
+    pub target: Duration,
+    /// Time the queueing delay may stay above the target before dropping starts
+    ///
+    /// Should be on the order of the round-trip times of the traffic inside the datagrams, so
+    /// that a burst has time to drain. Defaults to 100 ms.
+    pub interval: Duration,
+    /// Hard limit on queueing delay
+    ///
+    /// Datagrams that have waited longer than this are always dropped, whatever CoDel's state.
+    /// CoDel controls senders that slow down on loss, but its drop rate grows too slowly to shed
+    /// traffic that does not (e.g. a constant-rate stream at twice the path's rate), which would
+    /// otherwise queue up to the send buffer size. Defaults to `None`.
+    pub max_delay: Option<Duration>,
+}
+
+impl Default for DatagramCodel {
+    fn default() -> Self {
+        Self {
+            target: Duration::from_millis(5),
+            interval: Duration::from_millis(100),
+            max_delay: None,
+        }
+    }
+}
+
 /// There is no guarantee that the MTU on the path between A and B is the same as the MTU of the
 /// path between B and A. Therefore, each peer in the connection needs to run MTU discovery
 /// independently in order to discover the path's MTU.

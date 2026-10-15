@@ -4691,6 +4691,53 @@ impl ControllerFactory for PacingOnlyConfig {
     }
 }
 
+/// Sends 200 datagrams of 1000 bytes at once through a path paced at 125 kB/s, a 1.6 s backlog,
+/// and returns the client's stats and how many datagrams the server received.
+fn send_datagram_backlog(codel: Option<crate::DatagramCodel>) -> (crate::ConnectionStats, usize) {
+    let mut transport = TransportConfig::default();
+    transport
+        .congestion_controller_factory(Arc::new(PacingOnlyConfig {
+            cwnd_limited_reports: Default::default(),
+        }))
+        .datagram_send_codel(codel);
+    let mut client_cfg = client_config();
+    client_cfg.transport = Arc::new(transport);
+
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect_with(client_cfg);
+    for _ in 0..200 {
+        pair.client_datagrams(client_ch)
+            .send(Bytes::from_static(&[42; 1000]), true)
+            .unwrap();
+    }
+    pair.drive();
+
+    let mut received = 0;
+    while pair.server_datagrams(server_ch).recv().is_some() {
+        received += 1;
+    }
+    (pair.client_conn_mut(client_ch).stats(), received)
+}
+
+/// Queue management drops datagrams that wait too long for a paced path, instead of sending
+/// them all with up to 1.6 s of delay.
+#[test]
+fn datagram_codel_drops_a_standing_backlog() {
+    let _guard = subscribe();
+
+    let (stats, received) = send_datagram_backlog(None);
+    assert_eq!(received, 200);
+    assert_eq!(stats.datagrams_dropped_delay, 0);
+    assert_eq!(stats.datagrams_dropped_overflow, 0);
+
+    let (stats, received) = send_datagram_backlog(Some(crate::DatagramCodel::default()));
+    assert!(stats.datagrams_dropped_delay > 0);
+    assert_eq!(stats.datagrams_dropped_overflow, 0);
+    assert_eq!(received as u64 + stats.datagrams_dropped_delay, 200);
+    // The head of the backlog passes before dropping starts.
+    assert!(received >= 10, "only {received} datagrams received");
+}
+
 /// `C.is_cwnd_limited` means the sender filled the congestion window. A flow held back by
 /// pacing is not cwnd-limited and a paced controller such as BBR3 is pacing-limited by
 /// design, so conflating the two pins the signal true and breaks the decisions built on it.

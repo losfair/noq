@@ -310,6 +310,13 @@ pub struct ConnectionStats {
     ///
     /// See also [`PathStats::lost_bytes`].
     pub lost_bytes: u64,
+    /// Outgoing datagrams dropped by queue management before being sent.
+    ///
+    /// See [`TransportConfig::datagram_send_codel`](crate::TransportConfig::datagram_send_codel).
+    pub datagrams_dropped_delay: u64,
+    /// Outgoing datagrams dropped before being sent to make space in the send buffer, or because
+    /// they no longer fit the path MTU.
+    pub datagrams_dropped_overflow: u64,
 
     /// Number of [`super::Transmit`] produced by this connection.
     #[cfg(test)]
@@ -349,6 +356,8 @@ impl core::ops::Add<PathStats> for ConnectionStats {
             sent_bytes: self.sent_bytes + sent_bytes,
             lost_packets: self.lost_packets + lost_packets,
             lost_bytes: self.lost_bytes + lost_bytes,
+            datagrams_dropped_delay: self.datagrams_dropped_delay,
+            datagrams_dropped_overflow: self.datagrams_dropped_overflow,
             #[cfg(test)]
             transmits_tx: self.transmits_tx,
         }
@@ -386,6 +395,9 @@ impl core::ops::AddAssign<PathStats> for ConnectionStats {
             sent_bytes,
             lost_packets,
             lost_bytes,
+            // Connection-level, not path counters.
+            datagrams_dropped_delay: _,
+            datagrams_dropped_overflow: _,
             #[cfg(test)]
                 transmits_tx: _,
         } = self;

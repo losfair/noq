@@ -67,8 +67,9 @@ pub use rustls;
 
 mod config;
 pub use config::{
-    AckFrequencyConfig, ClientConfig, ConfigError, EndpointConfig, IdleTimeout, MtuDiscoveryConfig,
-    ServerConfig, StdSystemTime, TimeSource, TransportConfig, ValidationTokenConfig,
+    AckFrequencyConfig, ClientConfig, ConfigError, DatagramCodel, EndpointConfig, IdleTimeout,
+    MtuDiscoveryConfig, ServerConfig, StdSystemTime, TimeSource, TransportConfig,
+    ValidationTokenConfig,
 };
 #[cfg(feature = "qlog")]
 pub use config::{QlogConfig, QlogFactory, QlogFileFactory};

@@ -63,8 +63,8 @@ pub use proto::BloomTokenLog;
 pub use proto::{
     AckFrequencyConfig, ApplicationClose, Chunk, ClientConfig, ClosePathError, ClosedPath,
     ClosedStream, ConfigError, ConnectError, ConnectionClose, ConnectionError, ConnectionId,
-    ConnectionIdGenerator, ConnectionStats, DecryptedInitial, Dir, EcnCodepoint, EndpointConfig,
-    FourTuple, FrameStats, FrameType, IdleTimeout, InvalidCid, MtuDiscoveryConfig,
+    ConnectionIdGenerator, ConnectionStats, DatagramCodel, DecryptedInitial, Dir, EcnCodepoint,
+    EndpointConfig, FourTuple, FrameStats, FrameType, IdleTimeout, InvalidCid, MtuDiscoveryConfig,
     NetworkChangeHint, NoneTokenLog, NoneTokenStore, PathError, PathEvent, PathId, PathStats,
     PathStatus, ServerConfig, SetPathStatusError, Side, StdSystemTime, StreamId, TimeSource,
     TokenLog, TokenMemoryCache, TokenReuseError, TokenStore, Transmit, TransportConfig,

@@ -1104,6 +1104,18 @@ impl Connection {
             _ => false,
         };
 
+        // Datagram queue management runs where datagrams would be dequeued, before any packet
+        // is built for them.
+        if let Some(codel) = self.config.datagram_send_codel
+            && self
+                .datagrams
+                .manage_queue(now, codel, usize::from(self.current_mtu()))
+            && self.datagrams.send_blocked
+        {
+            self.events.push_back(Event::DatagramsUnblocked);
+            self.datagrams.send_blocked = false;
+        }
+
         // Schedule an ACK_FREQUENCY frame if a new one needs to be sent.
         if let Some(config) = &self.config.ack_frequency_config {
             let rtt = self
@@ -2761,6 +2773,8 @@ impl Connection {
             // Add<PathStats> for ConnectionStats`.
             stats += *path_stats;
         }
+        stats.datagrams_dropped_delay = self.datagrams.dropped_delay;
+        stats.datagrams_dropped_overflow = self.datagrams.dropped_overflow;
 
         stats
     }
@@ -7063,7 +7077,7 @@ impl Connection {
                 .datagrams
                 .outgoing
                 .front()
-                .is_some_and(|x| x.size(true) <= max_size);
+                .is_some_and(|x| x.datagram.size(true) <= max_size);
 
         // All `false` fields are set in PacketSpace::can_send.
         SendableFrames {
