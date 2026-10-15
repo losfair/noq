@@ -4738,6 +4738,48 @@ fn datagram_codel_drops_a_standing_backlog() {
     assert!(received >= 10, "only {received} datagrams received");
 }
 
+/// Sends a 240 ms backlog of datagrams (30 x 1000 bytes at 125 kB/s) over a 300 ms RTT path
+/// and returns how many datagrams queue management dropped.
+fn datagram_backlog_drops_at_300ms_rtt(codel: crate::DatagramCodel) -> u64 {
+    use super::tests::util::ConnPair;
+    let mut transport = TransportConfig::default();
+    transport
+        .congestion_controller_factory(Arc::new(PacingOnlyConfig {
+            cwnd_limited_reports: Default::default(),
+        }))
+        .datagram_send_codel(Some(codel));
+    let mut pair = ConnPair::builder()
+        .with_latency(Duration::from_millis(150))
+        .with_transport_cfg(transport)
+        .connect();
+    // Let the RTT estimate settle on the path.
+    pair.drive();
+    for _ in 0..30 {
+        pair.conn_mut(crate::Side::Client)
+            .datagrams()
+            .send(Bytes::from_static(&[42; 1000]), true)
+            .unwrap();
+    }
+    pair.drive();
+    pair.conn_mut(crate::Side::Client)
+        .stats()
+        .datagrams_dropped_delay
+}
+
+/// With a 100 ms interval CoDel drops a backlog that drains in less than one round trip of a
+/// 300 ms path; scaled with the RTT, it lets it pass.
+#[test]
+fn datagram_codel_interval_scales_with_rtt() {
+    let _guard = subscribe();
+    let fixed = crate::DatagramCodel::default();
+    assert!(datagram_backlog_drops_at_300ms_rtt(fixed) > 0);
+    let scaled = crate::DatagramCodel {
+        scale_with_rtt: true,
+        ..fixed
+    };
+    assert_eq!(datagram_backlog_drops_at_300ms_rtt(scaled), 0);
+}
+
 /// `C.is_cwnd_limited` means the sender filled the congestion window. A flow held back by
 /// pacing is not cwnd-limited and a paced controller such as BBR3 is pacing-limited by
 /// design, so conflating the two pins the signal true and breaks the decisions built on it.

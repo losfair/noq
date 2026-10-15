@@ -1107,9 +1107,11 @@ impl Connection {
         // Datagram queue management runs where datagrams would be dequeued, before any packet
         // is built for them.
         if let Some(codel) = self.config.datagram_send_codel
-            && self
-                .datagrams
-                .manage_queue(now, codel, usize::from(self.current_mtu()))
+            && self.datagrams.manage_queue(
+                now,
+                codel.for_rtt(self.max_path_min_rtt()),
+                usize::from(self.current_mtu()),
+            )
             && self.datagrams.send_blocked
         {
             self.events.push_back(Event::DatagramsUnblocked);
@@ -1219,6 +1221,15 @@ impl Connection {
         }
 
         None
+    }
+
+    /// The largest minimum RTT among the open paths that have RTT samples
+    fn max_path_min_rtt(&self) -> Option<Duration> {
+        self.paths
+            .iter()
+            .filter(|(id, path)| !self.abandoned_paths.contains(id) && path.data.rtt.has_samples())
+            .map(|(_, path)| path.data.rtt.min())
+            .max()
     }
 
     /// Computes the packet scheduling information for this path.

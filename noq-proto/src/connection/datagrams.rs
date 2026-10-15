@@ -615,6 +615,28 @@ mod tests {
     }
 
     #[test]
+    fn codel_parameters_scale_with_rtt() {
+        let fixed = DatagramCodel {
+            max_delay: Some(Duration::from_millis(200)),
+            ..config()
+        };
+        let rtt = Some(Duration::from_millis(300));
+        // Without scaling, or on short paths, the parameters stay as configured.
+        assert_eq!(fixed.for_rtt(rtt), fixed);
+        let scaled = DatagramCodel {
+            scale_with_rtt: true,
+            ..fixed
+        };
+        assert_eq!(scaled.for_rtt(None), scaled);
+        assert_eq!(scaled.for_rtt(Some(Duration::from_millis(80))), scaled);
+        // Longer paths scale all three in proportion.
+        let long = scaled.for_rtt(rtt);
+        assert_eq!(long.interval, Duration::from_millis(300));
+        assert_eq!(long.target, Duration::from_millis(15));
+        assert_eq!(long.max_delay, Some(Duration::from_millis(600)));
+    }
+
+    #[test]
     fn codel_keeps_a_single_waiting_datagram() {
         // One packet's worth is not a standing queue, however long it waits (e.g. cwnd-blocked).
         let mut state = DatagramState::default();

@@ -846,6 +846,11 @@ impl RttEstimator {
         self.min
     }
 
+    /// Whether any RTT sample was recorded, rather than only the initial estimate.
+    pub(crate) fn has_samples(&self) -> bool {
+        self.smoothed.is_some()
+    }
+
     /// PTO computed as described in RFC9002#6.2.1.
     pub(crate) fn pto_base(&self) -> Duration {
         self.get() + cmp::max(4 * self.var, TIMER_GRANULARITY)

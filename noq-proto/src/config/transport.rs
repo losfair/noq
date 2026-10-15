@@ -928,6 +928,31 @@ pub struct DatagramCodel {
     /// traffic that does not (e.g. a constant-rate stream at twice the path's rate), which would
     /// otherwise queue up to the send buffer size. Defaults to `None`.
     pub max_delay: Option<Duration>,
+    /// Scale the parameters with the paths' round-trip time
+    ///
+    /// CoDel's interval should be at least the round-trip time of the flows whose packets it
+    /// drops: with a shorter one it drops while their senders are still reacting to the previous
+    /// drop. With this set, `target`, `interval` and `max_delay` are taken as the values for a
+    /// round-trip time of up to `interval`. When the largest minimum RTT among the connection's
+    /// open paths is longer, all three are scaled up in proportion (interval = that RTT). The
+    /// minimum RTT is used because the smoothed RTT includes queueing delay. Defaults to `false`.
+    pub scale_with_rtt: bool,
+}
+
+impl DatagramCodel {
+    /// The parameters to use for paths whose largest minimum RTT is `rtt`
+    pub(crate) fn for_rtt(self, rtt: Option<Duration>) -> Self {
+        let Some(rtt) = rtt.filter(|rtt| self.scale_with_rtt && *rtt > self.interval) else {
+            return self;
+        };
+        let factor = rtt.as_secs_f64() / self.interval.as_secs_f64();
+        Self {
+            target: self.target.mul_f64(factor),
+            interval: rtt,
+            max_delay: self.max_delay.map(|d| d.mul_f64(factor)),
+            scale_with_rtt: true,
+        }
+    }
 }
 
 impl Default for DatagramCodel {
@@ -936,6 +961,7 @@ impl Default for DatagramCodel {
             target: Duration::from_millis(5),
             interval: Duration::from_millis(100),
             max_delay: None,
+            scale_with_rtt: false,
         }
     }
 }
