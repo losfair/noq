@@ -227,6 +227,10 @@ pub(super) struct PathData {
     pub(super) last_observed_addr_report: Option<ObservedAddr>,
     /// The QUIC-MULTIPATH path status
     pub(super) status: PathStatusState,
+    /// Local scheduling priority, lower values are preferred.
+    ///
+    /// See [`super::Connection::set_path_priority`].
+    pub(super) priority: u8,
     /// Number of the first packet sent on this path
     ///
     /// With RFC9000 §9 style migration (i.e. not multipath) the PathId does not change and
@@ -339,6 +343,7 @@ impl PathData {
             pending: PathRetransmits::default(),
             last_observed_addr_report: None,
             status: Default::default(),
+            priority: 0,
             first_packet: None,
             pto_count: 0,
             idle_timeout: config.default_path_max_idle_timeout,
@@ -387,6 +392,7 @@ impl PathData {
             pending: PathRetransmits::default(),
             last_observed_addr_report: None,
             status: prev.status.clone(),
+            priority: prev.priority,
             first_packet: None,
             pto_count: 0,
             idle_timeout: prev.idle_timeout,

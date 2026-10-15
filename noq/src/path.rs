@@ -174,6 +174,28 @@ impl Path {
             .set_path_status(self.id(), status)
     }
 
+    /// The current local scheduling priority of this path.
+    ///
+    /// See [`Path::set_priority`].
+    pub fn priority(&self) -> Result<u8, ClosedPath> {
+        self.conn
+            .lock_without_waking("path priority")
+            .inner
+            .path_priority(self.id())
+    }
+
+    /// Sets the local scheduling priority of this path, lower values are preferred.
+    ///
+    /// See [`proto::Connection::set_path_priority`] for how the priority is used.
+    ///
+    /// Returns the previous priority of the path.
+    pub fn set_priority(&self, priority: u8) -> Result<u8, ClosedPath> {
+        self.conn
+            .lock_and_wake("set path priority")
+            .inner
+            .set_path_priority(self.id(), priority)
+    }
+
     /// Returns the [`PathStats`] for this path.
     pub fn stats(&self) -> PathStats {
         // The `expect` is safe:

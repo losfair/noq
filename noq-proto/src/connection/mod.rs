@@ -22,6 +22,7 @@ use frame::StreamMetaVec;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use rustc_hash::FxHashMap;
 use thiserror::Error;
+use tinyvec::TinyVec;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
@@ -854,6 +855,31 @@ impl Connection {
         Ok(prev)
     }
 
+    /// Gets the local scheduling priority for a known [`PathId`]
+    ///
+    /// See [`Connection::set_path_priority`].
+    pub fn path_priority(&self, path_id: PathId) -> Result<u8, ClosedPath> {
+        self.path(path_id)
+            .map(|path| path.priority)
+            .ok_or(ClosedPath { _private: () })
+    }
+
+    /// Sets the local scheduling priority for a known [`PathId`]
+    ///
+    /// Data is sent on the path with the lowest priority value that is allowed to send data
+    /// and is not blocked by congestion control or pacing. Paths with equal priority are
+    /// tried in [`PathId`] order. All paths start with priority 0.
+    ///
+    /// This only orders paths that may send data according to their [`PathStatus`]: a
+    /// [`PathStatus::Backup`] path is still not used while an available path exists. The
+    /// priority is purely local and is not sent to the peer.
+    ///
+    /// Returns the previous priority on success.
+    pub fn set_path_priority(&mut self, path_id: PathId, priority: u8) -> Result<u8, ClosedPath> {
+        let path = self.path_mut(path_id).ok_or(ClosedPath { _private: () })?;
+        Ok(mem::replace(&mut path.priority, priority))
+    }
+
     /// Returns the remote path status
     // TODO(flub): Probably should also be some kind of path event?  Not even sure if I like
     //    this as an API, but for now it allows me to write a test easily.
@@ -1093,8 +1119,19 @@ impl Connection {
                 && self.peer_supports_ack_frequency();
         }
 
-        let mut next_path_id = self.paths.first_entry().map(|e| *e.key());
-        while let Some(path_id) = next_path_id {
+        // Paths are tried in order of their local priority, then their path ID, so that
+        // SpaceKind::Data frames go to the most preferred path that is not blocked.
+        let mut path_order = self
+            .paths
+            .iter()
+            .map(|(path_id, path)| (path.data.priority, *path_id))
+            .collect::<TinyVec<[(u8, PathId); 8]>>();
+        path_order.sort_unstable();
+        for (_, path_id) in path_order {
+            if !self.paths.contains_key(&path_id) {
+                // Discarded while polling an earlier path.
+                continue;
+            }
             if !connection_close_pending
                 && let Some(transmit) = self.poll_transmit_off_path(now, buf, path_id)
             {
@@ -1127,8 +1164,6 @@ impl Connection {
                 buf.is_empty(),
                 "nothing to send on path but buffer not empty"
             );
-
-            next_path_id = self.paths.keys().find(|i| **i > path_id).copied();
         }
 
         // We didn't produce any application data packet

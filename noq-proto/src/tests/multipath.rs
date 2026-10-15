@@ -1293,6 +1293,56 @@ fn path_scheduling_path_status() -> TestResult {
     Ok(())
 }
 
+/// Opens a second path and returns the client's datagrams sent on (path 0, path 1) while
+/// sending a little stream data with the given path priorities.
+fn send_with_path_priorities(prio0: u8, prio1: u8) -> TestResult<(u64, u64)> {
+    let mut pair = ConnPair::builder().enable_multipath().connect();
+    let server_addr = pair.routes.public_server_addr();
+    let path_1 = pair.open_path(
+        Client,
+        FourTuple::from_remote(server_addr),
+        PathStatus::Available,
+    )?;
+    pair.drive();
+
+    let conn = pair.conn_mut(Client);
+    assert_eq!(conn.set_path_priority(PathId::ZERO, prio0)?, 0);
+    assert_eq!(conn.set_path_priority(path_1, prio1)?, 0);
+    assert_eq!(conn.path_priority(PathId::ZERO)?, prio0);
+    assert_eq!(conn.path_priority(path_1)?, prio1);
+
+    let stats_path0_t0 = pair.conn_mut(Client).path_stats(PathId::ZERO).unwrap();
+    let stats_path1_t0 = pair.conn_mut(Client).path_stats(path_1).unwrap();
+
+    let s = pair.streams(Client).open(Dir::Uni).unwrap();
+    pair.send_stream(Client, s).write(b"hello").unwrap();
+    pair.drive();
+
+    let stats_path0_t1 = pair.conn_mut(Client).path_stats(PathId::ZERO).unwrap();
+    let stats_path1_t1 = pair.conn_mut(Client).path_stats(path_1).unwrap();
+    Ok((
+        stats_path0_t1.udp_tx.datagrams - stats_path0_t0.udp_tx.datagrams,
+        stats_path1_t1.udp_tx.datagrams - stats_path1_t0.udp_tx.datagrams,
+    ))
+}
+
+#[test]
+fn path_scheduling_priority() -> TestResult {
+    let _guard = subscribe();
+
+    info!("equal priorities use the lowest path ID");
+    let (path0, path1) = send_with_path_priorities(0, 0)?;
+    assert!(path0 > 0);
+    assert_eq!(path1, 0);
+
+    info!("a lower priority value is preferred over a lower path ID");
+    let (path0, path1) = send_with_path_priorities(1, 0)?;
+    assert_eq!(path0, 0);
+    assert!(path1 > 0);
+
+    Ok(())
+}
+
 #[test]
 fn server_abandon_last_verified_path() -> TestResult {
     // The client abandons the last verified path the server has. The server is expected to
