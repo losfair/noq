@@ -62,11 +62,34 @@ impl UdpSenderHelperSocket for UdpSocket {
     }
 
     fn try_send(&self, transmit: &udp::Transmit<'_>) -> io::Result<()> {
+        // OpenBSD fails a non-blocking UDP send with EAGAIN while another thread holds
+        // the socket's send buffer lock (`sosend` does not sleep for it under
+        // MSG_DONTWAIT), never because that buffer is full: UDP does not queue there.
+        // Clearing write readiness on such an error, as `try_io` does, waits for a
+        // kqueue write event that a UDP socket never raises again, stalling every
+        // sender on the socket for good. Retry instead, and drop the datagram if the
+        // contention persists, as for other send errors.
+        #[cfg(target_os = "openbsd")]
+        {
+            for _ in 0..OPENBSD_SEND_RETRIES {
+                match self.inner.send((&self.io).into(), transmit) {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::yield_now(),
+                    result => return result,
+                }
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "openbsd"))]
         self.io.try_io(Interest::WRITABLE, || {
             self.inner.send((&self.io).into(), transmit)
         })
     }
 }
+
+/// How often [`UdpSocket::try_send`] retries a send that lost the race for the
+/// socket's send buffer lock on OpenBSD.
+#[cfg(target_os = "openbsd")]
+const OPENBSD_SEND_RETRIES: usize = 64;
 
 impl AsyncUdpSocket for UdpSocket {
     fn create_sender(&self) -> Pin<Box<dyn super::UdpSender>> {
