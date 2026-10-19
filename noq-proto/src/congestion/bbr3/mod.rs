@@ -1740,7 +1740,11 @@ impl Bbr3 {
         if largest_packet_num_acked.is_some() {
             if self.app_limited != 0 && self.delivered > self.app_limited {
                 self.app_limited = 0;
-            } else if app_limited {
+            }
+            // Expiring the old marker must not skip marking a continuing idle period.
+            // Otherwise sparse keepalives alternate between app-limited and unrestricted
+            // samples, letting their tiny delivery rate falsely end STARTUP.
+            if app_limited {
                 self.app_limited = Ord::max(self.delivered + self.inflight, 1);
             }
             let round_count = self.round_count;
